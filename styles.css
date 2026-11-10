@@ -1,7 +1,7 @@
 /* Rail chrome follows the Tern theme. Status hues retain their meaning across
    color themes, with separate light/dark values for readable status text. */
 .agent-nav-root {
-    --agent-nav-running: light-dark(#1d4ed8, #60a5fa);
+    --agent-nav-running: light-dark(#1d4ed8, #7ab8ff);
     --agent-nav-running-shine: light-dark(#1e3a8a, #bfdbfe);
     --agent-nav-unread: light-dark(#15803d, #3ecf8e);
     --agent-nav-error: light-dark(#c1121f, #ff6166);
@@ -83,7 +83,7 @@
 .agent-nav-agent.is-current:active {
     /* Tint of the theme's strongest text color, so the selected agent reads in
        both appearances: dark text over a light surface, light over dark. */
-    background: color-mix(in srgb, var(--t1) 16%, transparent);
+    background: color-mix(in srgb, var(--t1) 9%, transparent);
 }
 
 /* The row picked up with shift-click, waiting for the row it is dropped above. */
@@ -131,7 +131,7 @@
     text-overflow: ellipsis;
     font-size: 12px;
     line-height: 1.35;
-    opacity: 0.85;
+    opacity: 0.95;
     pointer-events: none;
 }
 /* One block per subagent: its line, its doing line, and the jobs it runs. */
@@ -155,17 +155,17 @@
     text-overflow: ellipsis;
     font-size: 11px;
     line-height: 1.3;
-    opacity: 0.7;
+    opacity: 0.85;
     pointer-events: none;
 }
 /* An idle agent waits for its TTL or a message: muted, no clock. */
 .agent-nav-sub.is-idle {
-    opacity: 0.45;
+    opacity: 0.55;
 }
 /* A job under a subagent sits one indent deeper, inside the same block. */
 .agent-nav-sub.is-job {
     padding-left: 14px;
-    opacity: 0.62;
+    opacity: 0.78;
 }
 /* Row states. */
 .agent-nav-agent.status-running {
