@@ -644,7 +644,7 @@ local SUB_FRESH_MIN = 30
 -- How far back in the file to look for the newest intent: a busy agent can write
 -- hundreds of kilobytes between its last stated intent and its current line.
 local SUB_INTENT_BYTES = 300000
-type Sub = { name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, jobs: { Sub }? }
+type Sub = { name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, state: string?, jobs: { Sub }? }
 type Scan = { items: { Sub }, main: string?, changed: boolean }
 
 -- pane -> its subagents, and pane -> the directory holding its session files.
@@ -839,10 +839,15 @@ END {
 }
 find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FRESH_MIN) .. [[ | while IFS= read -r f; do
   t=$(tail -n 1 "$f")
+  # omp keeps an agent live from its spawn until it parks (idle TTL) or is killed:
+  # parking disposes the session and writes `session_exit`, a kill drops a
+  # `<transcript>.tombstone` beside it. Anything else is an agent omp still shows.
   case "$t" in *session_exit*) continue ;; esac
-  # A subagent that yielded (final assistant reply, no tool call pending) is done,
-  # even while omp keeps it parked for follow-up messages.
-  case "$t" in *'"role":"assistant"'*'"stopReason":"stop"'*|*'"stopReason":"stop"'*'"role":"assistant"'*) continue ;; esac
+  [ -f "$f.tombstone" ] && continue
+  # A final assistant reply with no tool call pending is an idle agent: its turn
+  # ended, the agent is alive until the idle TTL parks it.
+  st=running
+  case "$t" in *'"role":"assistant"'*'"stopReason":"stop"'*|*'"stopReason":"stop"'*'"role":"assistant"'*) st=idle ;; esac
   n=$(basename "$f" .jsonl)
   i=$(tail -c ]] .. tostring(SUB_INTENT_BYTES) .. [[ "$f" | grep -o '"i":"[^"]*"' | tail -n 1)
   i=${i#\"i\":\"}
@@ -859,7 +864,7 @@ find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FR
     c=$(printf '%s' "$l" | grep -o '"status":"completed"' | grep -c .)
     [ "${all:-0}" -gt 0 ] && p=$((c * 100 / all))
   fi
-  printf 'S\t%s\t%s\t%s\t%s\n' "$n" "$e" "$p" "$i"
+  printf 'S\t%s\t%s\t%s\t%s\t%s\n' "$n" "$e" "$p" "$st" "$i"
   # A running subagent's own transcript carries its async jobs; the offset for it
   # arrives in the spec from the last pass.
   ent=$(printf '%s\n' "$spec" | while IFS='|' read -r sp so sl; do [ "$sp" = "$f" ] && { printf '%s|%s' "$so" "$sl"; break; }; done)
@@ -1029,9 +1034,15 @@ local function parse_scan(stdout: string, parent: string): Scan
 				sub_path[rest] = cur
 			end
 		elseif kind == "S" then
-			local name, started, pct, doing = string.match(rest, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+			local name, started, pct, state, doing = string.match(rest, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
 			if name and name ~= "" then
-				table.insert(items, { name = clip(name, 40), doing = clip(doing, SUB_TEXT_MAX), started = tonumber(started), pct = tonumber(pct) })
+				table.insert(items, {
+					name = clip(name, 40),
+					doing = clip(doing, SUB_TEXT_MAX),
+					started = tonumber(started),
+					pct = tonumber(pct),
+					state = state,
+				})
 			end
 		elseif kind == "F" then
 			-- The file was rewritten under the cache: start over.
@@ -1226,7 +1237,7 @@ local function scan_subagents(dir: string, panes: { number })
 					else
 						for index, item in items do
 							local was = before[index]
-							if was.name ~= item.name or was.doing ~= item.doing then
+							if was.name ~= item.name or was.doing ~= item.doing or was.state ~= item.state then
 								changed = true
 							end
 							local old_jobs = was.jobs or {}
@@ -1476,12 +1487,15 @@ local function agent_row_node(ag: AgentRow): Node
 	-- A subagent line, and one indent deeper a job it runs.
 	local function sub_node(sub: Sub, nested: boolean): Node
 		local label = if sub.job then short_command(sub.name) else sub.name
+		-- An idle agent's clock is not ticking: it waits for the idle TTL or a
+		-- message, so it shows neither elapsed nor percent.
+		local idle = sub.state == "idle"
 		local meta: { string } = {}
-		if sub.started then
+		if sub.started and not idle then
 			table.insert(meta, elapsed(os.time() - sub.started))
 		end
 		-- A program job has no percent: its share of a todo list is not its progress.
-		if sub.pct and not sub.job then
+		if sub.pct and not sub.job and not idle then
 			table.insert(meta, tostring(sub.pct) .. "%")
 		end
 		if #meta > 0 then
@@ -1494,7 +1508,7 @@ local function agent_row_node(ag: AgentRow): Node
 			table.insert(children, ui.el("span", { class = "agent-nav-sub-doing", text = sub.doing }))
 		end
 		return ui.el("span", {
-			class = if nested then "agent-nav-sub is-job" else "agent-nav-sub",
+			class = if nested then "agent-nav-sub is-job" elseif idle then "agent-nav-sub is-idle" else "agent-nav-sub",
 			-- The full command stays reachable on hover.
 			attrs = if sub.title then { title = sub.title } else nil,
 		}, children)

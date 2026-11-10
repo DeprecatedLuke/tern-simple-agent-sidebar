@@ -141,6 +141,10 @@
     opacity: 0.7;
     pointer-events: none;
 }
+/* An idle agent waits for its TTL or a message: muted, no clock. */
+.agent-nav-sub.is-idle {
+    opacity: 0.45;
+}
 /* A job under a subagent sits one indent deeper, inside the same block. */
 .agent-nav-sub.is-job {
     padding-left: 14px;
