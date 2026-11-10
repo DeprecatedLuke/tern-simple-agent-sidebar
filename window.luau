@@ -846,6 +846,10 @@ find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FR
   # `<transcript>.tombstone` beside it. Anything else is an agent omp still shows.
   case "$t" in *session_exit*) continue ;; esac
   [ -f "$f.tombstone" ] && continue
+  # A cancelled task ends on an assistant record with `stopReason:"aborted"`. omp
+  # keeps the agent resumable, but it is not working; a resume appends new
+  # records and brings it back.
+  case "$t" in *'"role":"assistant"'*'"stopReason":"aborted"'*|*'"stopReason":"aborted"'*'"role":"assistant"'*) continue ;; esac
   # A final assistant reply with no tool call pending is an idle agent: its turn
   # ended, the agent is alive until the idle TTL parks it.
   st=running
