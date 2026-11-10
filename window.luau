@@ -1502,16 +1502,24 @@ local function agent_row_node(ag: AgentRow): Node
 	-- A subagent line, and one indent deeper a job it runs.
 	local function sub_node(sub: Sub, nested: boolean): Node
 		local label = if sub.job then short_command(sub.name) else sub.name
-		-- An idle agent's clock is not ticking: it waits for the idle TTL or a
-		-- message, so it shows neither elapsed nor percent.
+		-- An idle agent's turn is over; it is listed only while its own jobs run
+		-- and will wake it, so it says so instead of showing a clock or percent.
 		local idle = sub.state == "idle"
 		local meta: { string } = {}
-		if sub.started and not idle then
-			table.insert(meta, elapsed(os.time() - sub.started))
-		end
-		-- A program job has no percent: its share of a todo list is not its progress.
-		if sub.pct and not sub.job and not idle then
-			table.insert(meta, tostring(sub.pct) .. "%")
+		if idle then
+			local n = 0
+			for _ in sub.jobs or {} do
+				n += 1
+			end
+			table.insert(meta, "waiting on " .. tostring(n) .. (if n == 1 then " job" else " jobs"))
+		else
+			if sub.started then
+				table.insert(meta, elapsed(os.time() - sub.started))
+			end
+			-- A program job has no percent: its share of a todo list is not its progress.
+			if sub.pct and not sub.job then
+				table.insert(meta, tostring(sub.pct) .. "%")
+			end
 		end
 		-- One row: name, the agent role it was spawned as, then the clock.
 		local head: { Node } = { ui.el("span", { class = "agent-nav-sub-name", text = label }) }
