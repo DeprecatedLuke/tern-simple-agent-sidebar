@@ -1534,6 +1534,12 @@ local function agent_row_node(ag: AgentRow): Node
 		}, children)
 	end
 	for _, sub in ag.subagents do
+		-- An idle agent with nothing running is done for the user, even though
+		-- omp keeps it messageable until its TTL parks it. One still waiting on
+		-- its own background jobs will be woken by them, so it stays listed.
+		if sub.state == "idle" and next(sub.jobs or {}) == nil then
+			continue
+		end
 		-- One block per subagent: its line, what it is doing, and its jobs.
 		local block: { Node } = { sub_node(sub, false) }
 		local shown = 0
