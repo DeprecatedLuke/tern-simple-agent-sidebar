@@ -32,7 +32,24 @@
 .agent-nav-root .agent-nav-agent,
 .agent-nav-root .agent-nav-agent:active { transform: none; animation: none; transition: none; }
 .agent-nav-sub { display: flex; gap: 6px; min-width: 0; }
-.agent-nav-sub-name { flex: none; font-weight: 550; }
+.agent-nav-sub-head {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+}
+.agent-nav-sub-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 550;
+}
+/* The agent role omp spawned it as: plain text, a little muted. */
+.agent-nav-sub-role { flex: none; opacity: 0.55; }
+.agent-nav-sub-meta { flex: none; opacity: 0.8; }
 .agent-nav-sub-doing { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
 
 .agent-nav-agent {

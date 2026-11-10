@@ -644,7 +644,7 @@ local SUB_FRESH_MIN = 30
 -- How far back in the file to look for the newest intent: a busy agent can write
 -- hundreds of kilobytes between its last stated intent and its current line.
 local SUB_INTENT_BYTES = 300000
-type Sub = { name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, state: string?, jobs: { Sub }? }
+type Sub = { name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, state: string?, role: string?, jobs: { Sub }? }
 type Scan = { items: { Sub }, main: string?, changed: boolean }
 
 -- pane -> its subagents, and pane -> the directory holding its session files.
@@ -826,7 +826,9 @@ function flush(l,   t, rest, seg, jid, typ, st, tcid, cmd, it, ts, lim, id) {
       rest = substr(rest, ms + ml)
     }
   }
-  if (index(l, "## Still Running") > 0 || index(l, "## Completed") > 0) {
+  # A snapshot comes from the wait tool result itself, not from the same text
+  # quoted in another tool output (a transcript read, a note about a past wait).
+  if ((index(l, "## Still Running") > 0 || index(l, "## Completed") > 0) && index(l, "\"toolName\":\"wait\"") > 0) {
     t = l; gsub(/\\n/, "\n", t); sections(t)
   }
 }
@@ -853,6 +855,10 @@ find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FR
   i=${i#\"i\":\"}
   i=${i%\"}
   s=$(head -n 5 "$f" | grep '"type":"session"' | grep -o '"timestamp":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+  # The agent role omp spawned it as (`task`, `scout`, `reviewer`, ...) is in its
+  # own session_init record, right after the session head.
+  r=$(head -n 8 "$f" | grep -o '"agent":"[^"]*","resolvedModel"' | head -n 1 | cut -d'"' -f4)
+  [ -z "$r" ] && r=$(head -n 8 "$f" | grep '"type":"session_init"' | grep -o '"agent":"[^"]*"' | head -n 1 | cut -d'"' -f4)
   e=$(date -d "$s" +%s 2>/dev/null)
   # Percent done from the newest todo state: completed of all tasks not abandoned.
   p=
@@ -864,7 +870,7 @@ find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FR
     c=$(printf '%s' "$l" | grep -o '"status":"completed"' | grep -c .)
     [ "${all:-0}" -gt 0 ] && p=$((c * 100 / all))
   fi
-  printf 'S\t%s\t%s\t%s\t%s\t%s\n' "$n" "$e" "$p" "$st" "$i"
+  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$e" "$p" "$st" "$r" "$i"
   # A running subagent's own transcript carries its async jobs; the offset for it
   # arrives in the spec from the last pass.
   ent=$(printf '%s\n' "$spec" | while IFS='|' read -r sp so sl; do [ "$sp" = "$f" ] && { printf '%s|%s' "$so" "$sl"; break; }; done)
@@ -930,7 +936,7 @@ type JobCache = {
 	pending_order: { string },
 }
 local KV_JOBS = "agent_nav.jobs"
-local JOBS_VERSION = 3
+local JOBS_VERSION = 4
 local jobCache: { [string]: JobCache } = {}
 local jobsLoaded = false
 local lastJobSave = 0
@@ -1034,7 +1040,7 @@ local function parse_scan(stdout: string, parent: string): Scan
 				sub_path[rest] = cur
 			end
 		elseif kind == "S" then
-			local name, started, pct, state, doing = string.match(rest, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+			local name, started, pct, state, role, doing = string.match(rest, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
 			if name and name ~= "" then
 				table.insert(items, {
 					name = clip(name, 40),
@@ -1042,6 +1048,7 @@ local function parse_scan(stdout: string, parent: string): Scan
 					started = tonumber(started),
 					pct = tonumber(pct),
 					state = state,
+					role = if role ~= "" then clip(role, 20) else nil,
 				})
 			end
 		elseif kind == "F" then
@@ -1498,10 +1505,15 @@ local function agent_row_node(ag: AgentRow): Node
 		if sub.pct and not sub.job and not idle then
 			table.insert(meta, tostring(sub.pct) .. "%")
 		end
-		if #meta > 0 then
-			label ..= " (" .. table.concat(meta, ", ") .. ")"
+		-- One row: name, the agent role it was spawned as, then the clock.
+		local head: { Node } = { ui.el("span", { class = "agent-nav-sub-name", text = label }) }
+		if sub.role and sub.role ~= "" then
+			table.insert(head, ui.el("span", { class = "agent-nav-sub-role", text = sub.role }))
 		end
-		local children: { Node } = { ui.el("span", { class = "agent-nav-sub-name", text = label }) }
+		if #meta > 0 then
+			table.insert(head, ui.el("span", { class = "agent-nav-sub-meta", text = "(" .. table.concat(meta, ", ") .. ")" }))
+		end
+		local children: { Node } = { ui.el("span", { class = "agent-nav-sub-head" }, head) }
 		table.insert(kept, label)
 		table.insert(kept, sub.name)
 		if fresh(sub.doing) then
