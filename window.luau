@@ -757,8 +757,10 @@ function sections(t,   n, L, i, l, rest, j, id, typ, st, k, it, lb, inrun) {
   inrun = 0
   for (i = 1; i <= n; i++) {
     l = L[i]
-    if (index(l, "## Still Running") == 1) { printf "K\n"; inrun = 1; continue }
-    if (substr(l, 1, 3) == "## ") { inrun = 0; continue }
+    # The first section of a tool result shares its line with the JSON before
+    # the text value, so the headers are found anywhere on the line.
+    if (index(l, "## Still Running") > 0) { printf "K\n"; inrun = 1; continue }
+    if (substr(l, 1, 3) == "## " || index(l, "\"text\":\"## ") > 0) { inrun = 0; continue }
     if (substr(l, 1, 4) == "### ") {
       rest = substr(l, 5); j = index(rest, " ")
       if (j == 0) continue
@@ -812,8 +814,10 @@ function flush(l,   t, rest, seg, jid, typ, st, tcid, cmd, it, ts, lim, id) {
     return
   }
   if (index(l, "\"type\":\"session\"") > 0 || index(l, "\"type\":\"session_exit\"") > 0) { printf "Z\n"; split("", alive); return }
-  # A job report is a record detail, not a copy of one inside tool output.
-  if (index(l, "\"jobs\":[") > 0 && (index(l, "\"details\":{\"meta\"") > 0 || index(l, "\"details\":{\"jobs\"") > 0)) {
+  # A job report is a record detail, not a copy of one inside tool output: the
+  # async-result delivery (`details.jobs`/`details.meta`), a `wait` result
+  # (`details.op = "wait"`) and a `proc://…/kill` cancel (`details.proc.op = "cancel"`).
+  if (index(l, "\"jobs\":[") > 0 && (index(l, "\"details\":{\"meta\"") > 0 || index(l, "\"details\":{\"jobs\"") > 0 || index(l, "\"details\":{\"op\":\"wait\"") > 0 || index(l, "\"details\":{\"proc\":{\"op\":\"cancel\"") > 0)) {
     rest = l
     while (match(rest, /"(jobId|id)":"[^"]*"[^}]*"status":"[^"]*"/)) {
       # match() resets RSTART/RLENGTH, so keep the extent of this match first.
@@ -940,7 +944,7 @@ type JobCache = {
 	pending_order: { string },
 }
 local KV_JOBS = "agent_nav.jobs"
-local JOBS_VERSION = 4
+local JOBS_VERSION = 5
 local jobCache: { [string]: JobCache } = {}
 local jobsLoaded = false
 local lastJobSave = 0
