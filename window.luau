@@ -644,7 +644,7 @@ local SUB_FRESH_MIN = 30
 -- How far back in the file to look for the newest intent: a busy agent can write
 -- hundreds of kilobytes between its last stated intent and its current line.
 local SUB_INTENT_BYTES = 300000
-type Sub = { name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, state: string?, role: string?, jobs: { Sub }? }
+type Sub = { id: string?, name: string, title: string?, doing: string, started: number?, pct: number?, job: boolean?, state: string?, role: string?, jobs: { Sub }?, children: { Sub }? }
 type Scan = { items: { Sub }, main: string?, changed: boolean }
 
 -- pane -> its subagents, and pane -> the directory holding its session files.
@@ -697,7 +697,7 @@ jobscan() {
     # The cached offset has to sit just past a newline; anything else is a rewrite.
     start=1; full=1
   fi
-  printf 'J\t%s\n' "$tag"
+  printf 'J\t%s\n' "$f"
   [ "$full" = 1 ] && printf 'F\n'
   printf 'L1\t%s\n' "$l1"
   endsnl=1
@@ -843,47 +843,64 @@ END {
 
 }'
 }
-find "$d" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FRESH_MIN) .. [[ | while IFS= read -r f; do
-  t=$(tail -n 1 "$f")
-  # omp keeps an agent live from its spawn until it parks (idle TTL) or is killed:
-  # parking disposes the session and writes `session_exit`, a kill drops a
-  # `<transcript>.tombstone` beside it. Anything else is an agent omp still shows.
-  case "$t" in *session_exit*) continue ;; esac
-  [ -f "$f.tombstone" ] && continue
-  # A cancelled task ends on an assistant record with `stopReason:"aborted"`. omp
-  # keeps the agent resumable, but it is not working; a resume appends new
-  # records and brings it back.
-  case "$t" in *'"role":"assistant"'*'"stopReason":"aborted"'*|*'"stopReason":"aborted"'*'"role":"assistant"'*) continue ;; esac
-  # A final assistant reply with no tool call pending is an idle agent: its turn
-  # ended, the agent is alive until the idle TTL parks it.
-  st=running
-  case "$t" in *'"role":"assistant"'*'"stopReason":"stop"'*|*'"stopReason":"stop"'*'"role":"assistant"'*) st=idle ;; esac
-  n=$(basename "$f" .jsonl)
-  i=$(tail -c ]] .. tostring(SUB_INTENT_BYTES) .. [[ "$f" | grep -o '"i":"[^"]*"' | tail -n 1)
-  i=${i#\"i\":\"}
-  i=${i%\"}
-  s=$(head -n 5 "$f" | grep '"type":"session"' | grep -o '"timestamp":"[^"]*"' | head -n 1 | cut -d'"' -f4)
-  # The agent role omp spawned it as (`task`, `scout`, `reviewer`, ...) is in its
-  # own session_init record, right after the session head.
-  r=$(head -n 8 "$f" | grep -o '"agent":"[^"]*","resolvedModel"' | head -n 1 | cut -d'"' -f4)
-  [ -z "$r" ] && r=$(head -n 8 "$f" | grep '"type":"session_init"' | grep -o '"agent":"[^"]*"' | head -n 1 | cut -d'"' -f4)
-  e=$(date -d "$s" +%s 2>/dev/null)
-  # Percent done from the newest todo state: completed of all tasks not abandoned.
-  p=
-  l=$(tail -c ]] .. tostring(SUB_INTENT_BYTES) .. [[ "$f" | grep '"details":{"op"' | grep '"phases":\[' | tail -n 1)
-  if [ -n "$l" ]; then
-    l=${l#*\"details\":\{\"op\"}
-    l=${l%%\"storage\"*}
-    all=$(printf '%s' "$l" | grep -o '"status":"[a-z_]*"' | grep -vc abandoned)
-    c=$(printf '%s' "$l" | grep -o '"status":"completed"' | grep -c .)
-    [ "${all:-0}" -gt 0 ] && p=$((c * 100 / all))
-  fi
-  printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$e" "$p" "$st" "$r" "$i"
-  # A running subagent's own transcript carries its async jobs; the offset for it
-  # arrives in the spec from the last pass.
-  ent=$(printf '%s\n' "$spec" | while IFS='|' read -r sp so sl; do [ "$sp" = "$f" ] && { printf '%s|%s' "$so" "$sl"; break; }; done)
-  jobscan "$f" "${ent%%|*}" "${ent#*|}" "$n"
-done
+# omp nests an agent's own children under its artifacts dir, named after it:
+# `<session dir>/<Name>.jsonl`, then `<session dir>/<Name>/<Name>.<Child>.jsonl`,
+# then `<session dir>/<Name>/<Name>.<Child>/<Name>.<Child>.<Grandchild>.jsonl`
+# (the id is `${parent}.${child}`, and a transcript's artifacts dir is its own
+# path without `.jsonl`). Walk that shape level by level; a folder is entered
+# only when its owner passed the liveness checks below.
+scan_dir() {
+  # Locals: a recursive call must not clobber the caller's walk.
+  local sd=$1 sp=$2 sdep=$3
+  local b f t st i s r e p l all c ent
+  [ -d "$sd" ] || return 0
+  find "$sd" -maxdepth 1 -name '*.jsonl' ! -name '__*' -mmin -]] .. tostring(SUB_FRESH_MIN) .. [[ | while IFS= read -r f; do
+    b=$(basename "$f" .jsonl)
+    if [ -n "$sp" ]; then
+      case "$b" in "$sp".*) ;; *) continue ;; esac
+    fi
+    t=$(tail -n 1 "$f")
+    # omp keeps an agent live from its spawn until it parks (idle TTL) or is killed:
+    # parking disposes the session and writes `session_exit`, a kill drops a
+    # `<transcript>.tombstone` beside it. Anything else is an agent omp still shows.
+    case "$t" in *session_exit*) continue ;; esac
+    [ -f "$f.tombstone" ] && continue
+    # A cancelled task ends on an assistant record with `stopReason:"aborted"`. omp
+    # keeps the agent resumable, but it is not working; a resume appends new
+    # records and brings it back.
+    case "$t" in *'"role":"assistant"'*'"stopReason":"aborted"'*|*'"stopReason":"aborted"'*'"role":"assistant"'*) continue ;; esac
+    # A final assistant reply with no tool call pending is an idle agent: its turn
+    # ended, the agent is alive until the idle TTL parks it.
+    st=running
+    case "$t" in *'"role":"assistant"'*'"stopReason":"stop"'*|*'"stopReason":"stop"'*'"role":"assistant"'*) st=idle ;; esac
+    i=$(tail -c ]] .. tostring(SUB_INTENT_BYTES) .. [[ "$f" | grep -o '"i":"[^"]*"' | tail -n 1)
+    i=${i#\"i\":\"}
+    i=${i%\"}
+    s=$(head -n 5 "$f" | grep '"type":"session"' | grep -o '"timestamp":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    # The agent role omp spawned it as (`task`, `scout`, `reviewer`, ...) is in its
+    # own session_init record, right after the session head.
+    r=$(head -n 8 "$f" | grep -o '"agent":"[^"]*","resolvedModel"' | head -n 1 | cut -d'"' -f4)
+    [ -z "$r" ] && r=$(head -n 8 "$f" | grep '"type":"session_init"' | grep -o '"agent":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    e=$(date -d "$s" +%s 2>/dev/null)
+    # Percent done from the newest todo state: completed of all tasks not abandoned.
+    p=
+    l=$(tail -c ]] .. tostring(SUB_INTENT_BYTES) .. [[ "$f" | grep '"details":{"op"' | grep '"phases":\[' | tail -n 1)
+    if [ -n "$l" ]; then
+      l=${l#*\"details\":\{\"op\"}
+      l=${l%%\"storage\"*}
+      all=$(printf '%s' "$l" | grep -o '"status":"[a-z_]*"' | grep -vc abandoned)
+      c=$(printf '%s' "$l" | grep -o '"status":"completed"' | grep -c .)
+      [ "${all:-0}" -gt 0 ] && p=$((c * 100 / all))
+    fi
+    printf 'S\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sdep" "$b" "$e" "$p" "$st" "$r" "$f" "$i"
+    # A running subagent's own transcript carries its async jobs; the offset for it
+    # arrives in the spec from the last pass.
+    ent=$(printf '%s\n' "$spec" | while IFS='|' read -r sp2 so sl; do [ "$sp2" = "$f" ] && { printf '%s|%s' "$so" "$sl"; break; }; done)
+    jobscan "$f" "${ent%%|*}" "${ent#*|}" "$b"
+    scan_dir "$sd/$b" "$b" $((sdep + 1))
+  done
+}
+scan_dir "$d" "" 1
 p="$d.jsonl"
 [ -f "$p" ] || exit 0
 # The main agent: the task it marked in progress, else the newest intent it stated.
@@ -892,7 +909,7 @@ ti=$(printf '%s' "$t" | grep '"phases":\[' | tail -n 1 | grep -o '"content":"[^"
 [ -n "$ti" ] && printf 'T\t%s\n' "$ti"
 mi=$(printf '%s' "$t" | grep -o '"i":"[^"]*"' | tail -n 1 | cut -d'"' -f4)
 [ -n "$mi" ] && printf 'M\t%s\n' "$mi"
-jobscan "$p" "${2:-0}" "${3:-}" ""]]
+jobscan "$p" "${2:-0}" "${3:-}" "$p"]]
 
 -- "5h10m", "3m20s", "45s": the two largest units.
 local function elapsed(secs: number): string
@@ -1026,6 +1043,8 @@ end
 
 local function parse_scan(stdout: string, parent: string): Scan
 	local items: { Sub } = {}
+	local nodes: { [string]: Sub } = {}
+	local order: { Sub } = {}
 	local main_intent: string? = nil
 	local main_todo: string? = nil
 	local changed = false
@@ -1041,23 +1060,28 @@ local function parse_scan(stdout: string, parent: string): Scan
 		-- Event names are one letter or two (L1), never a word.
 		local kind, rest = string.match(line, "^(%a%d?)\t?(.*)$")
 		if kind == "J" then
-			if rest == "" then
-				cur = parent
-			else
-				cur = dir .. "/" .. rest .. ".jsonl"
-				sub_path[rest] = cur
-			end
+			cur = if rest == "" then parent else rest
 		elseif kind == "S" then
-			local name, started, pct, state, role, doing = string.match(rest, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
-			if name and name ~= "" then
-				table.insert(items, {
+			local depth, id, started, pct, state, role, path, doing = string.match(rest, "^(%d*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+			if id and id ~= "" then
+				-- omp names a child `<parent>.<child>`, and the file lives in the
+				-- parent's artifacts dir; the id prefix is the parent link.
+				local parent_id = string.match(id, "^(.*)%.[^.]*$") or ""
+				local name = if parent_id ~= "" then string.sub(id, #parent_id + 2) else id
+				local node: Sub = {
+					id = id,
 					name = clip(name, 40),
 					doing = clip(doing, SUB_TEXT_MAX),
 					started = tonumber(started),
 					pct = tonumber(pct),
 					state = state,
 					role = if role ~= "" then clip(role, 20) else nil,
-				})
+				}
+				nodes[id] = node
+				table.insert(order, node)
+				if path and path ~= "" then
+					sub_path[id] = path
+				end
 			end
 		elseif kind == "F" then
 			-- The file was rewritten under the cache: start over.
@@ -1173,21 +1197,53 @@ local function parse_scan(stdout: string, parent: string): Scan
 			changed = true
 		end
 	end
-	-- A running subagent carries its own async jobs, one indent deeper.
-	local running: { [string]: boolean } = {}
-	for _, item in items do
-		local path = sub_path[item.name]
-		if path then
-			running[path] = true
-			local jobs = alive_jobs(path, now)
-			if #jobs > 0 then
-				item.jobs = jobs
-			end
+	-- The scan walks the tree, so the flat `S` lines become nested nodes here.
+	local top: { Sub } = {}
+	for _, node in order do
+		local parent_id = string.match(node.id or "", "^(.*)%.[^.]*$") or ""
+		local p = if parent_id ~= "" then nodes[parent_id] else nil
+		if p then
+			p.children = p.children or {}
+			table.insert(p.children, node)
+		else
+			table.insert(top, node)
 		end
 	end
-	-- A subagent that is no longer running keeps no job cache.
+	-- A node is listed while it runs, while it waits on its own jobs, or while a
+	-- live descendant does; anything else is done for the user even though omp
+	-- keeps it messageable until its TTL.
+	local live_paths: { [string]: boolean } = {}
+	local listed = 0
+	local function mark(node: Sub): boolean
+		local path = sub_path[node.id or ""]
+		local jobs = if path then alive_jobs(path, now) else {}
+		if #jobs > 0 then
+			node.jobs = jobs
+		end
+		local kids: { Sub } = {}
+		for _, child in node.children or {} do
+			if mark(child) then
+				table.insert(kids, child)
+			end
+		end
+		node.children = if #kids > 0 then kids else nil
+		local live = node.state ~= "idle" or #jobs > 0 or #kids > 0
+		if live then
+			listed += 1
+			if path then
+				live_paths[path] = true
+			end
+		end
+		return live
+	end
+	for _, node in top do
+		if listed < SUB_MAX and mark(node) then
+			table.insert(items, node)
+		end
+	end
+	-- A subagent that is no longer listed keeps no job cache.
 	for path in jobCache do
-		if path ~= parent and string.sub(path, 1, #dir + 1) == dir .. "/" and not running[path] then
+		if path ~= parent and string.sub(path, 1, #dir + 1) == dir .. "/" and not live_paths[path] then
 			jobCache[path] = nil
 			changed = true
 		end
@@ -1206,6 +1262,26 @@ local function parse_scan(stdout: string, parent: string): Scan
 		main = clip(text, 100)
 	end
 	return { items = items, main = main, changed = changed }
+end
+
+-- The same tree, node for node: names, what they are doing, their state and
+-- everything nested under them.
+local function same_nodes(a: { Sub }?, b: { Sub }?): boolean
+	a = a or {}
+	b = b or {}
+	if #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		local x, y = a[i], b[i]
+		if x.name ~= y.name or x.doing ~= y.doing or x.state ~= y.state or x.role ~= y.role then
+			return false
+		end
+		if not same_nodes(x.jobs, y.jobs) or not same_nodes(x.children, y.children) then
+			return false
+		end
+	end
+	return true
 end
 
 -- One shell pass for one session directory; the panes that share it get its list.
@@ -1250,22 +1326,8 @@ local function scan_subagents(dir: string, panes: { number })
 					if not before or #before ~= #items or mainDoing[pane] ~= scan.main then
 						changed = true
 					else
-						for index, item in items do
-							local was = before[index]
-							if was.name ~= item.name or was.doing ~= item.doing or was.state ~= item.state then
-								changed = true
-							end
-							local old_jobs = was.jobs or {}
-							local new_jobs = item.jobs or {}
-							if #old_jobs ~= #new_jobs then
-								changed = true
-							else
-								for j = 1, #new_jobs do
-									if old_jobs[j].name ~= new_jobs[j].name or old_jobs[j].doing ~= new_jobs[j].doing then
-										changed = true
-									end
-								end
-							end
+						if not same_nodes(before, items) then
+							changed = true
 						end
 					end
 					subItems[pane] = items
@@ -1507,11 +1569,23 @@ local function agent_row_node(ag: AgentRow): Node
 		local idle = sub.state == "idle"
 		local meta: { string } = {}
 		if idle then
-			local n = 0
+			local n_jobs, n_agents = 0, 0
 			for _ in sub.jobs or {} do
-				n += 1
+				n_jobs += 1
 			end
-			table.insert(meta, "waiting on " .. tostring(n) .. (if n == 1 then " job" else " jobs"))
+			for _ in sub.children or {} do
+				n_agents += 1
+			end
+			local parts: { string } = {}
+			if n_jobs > 0 then
+				table.insert(parts, tostring(n_jobs) .. (if n_jobs == 1 then " job" else " jobs"))
+			end
+			if n_agents > 0 then
+				table.insert(parts, tostring(n_agents) .. (if n_agents == 1 then " agent" else " agents"))
+			end
+			if #parts > 0 then
+				table.insert(meta, "waiting on " .. table.concat(parts, ", "))
+			end
 		else
 			if sub.started then
 				table.insert(meta, elapsed(os.time() - sub.started))
@@ -1541,14 +1615,9 @@ local function agent_row_node(ag: AgentRow): Node
 			attrs = if sub.title then { title = sub.title } else nil,
 		}, children)
 	end
-	for _, sub in ag.subagents do
-		-- An idle agent with nothing running is done for the user, even though
-		-- omp keeps it messageable until its TTL parks it. One still waiting on
-		-- its own background jobs will be woken by them, so it stays listed.
-		if sub.state == "idle" and next(sub.jobs or {}) == nil then
-			continue
-		end
-		-- One block per subagent: its line, what it is doing, and its jobs.
+	-- One block per agent: its line, what it is doing, its jobs, then its own
+	-- children's blocks, each one indent deeper inside it.
+	local function sub_block(sub: Sub): Node
 		local block: { Node } = { sub_node(sub, false) }
 		local shown = 0
 		for _, job in sub.jobs or {} do
@@ -1558,7 +1627,13 @@ local function agent_row_node(ag: AgentRow): Node
 			end
 			table.insert(block, sub_node(job, true))
 		end
-		table.insert(text_nodes, ui.el("div", { class = "agent-nav-block" }, block))
+		for _, child in sub.children or {} do
+			table.insert(block, sub_block(child))
+		end
+		return ui.el("div", { class = "agent-nav-block" }, block)
+	end
+	for _, sub in ag.subagents do
+		table.insert(text_nodes, sub_block(sub))
 	end
 	return ui.el("button", {
 		key = action_key,
