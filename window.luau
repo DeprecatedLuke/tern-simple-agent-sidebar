@@ -1688,16 +1688,13 @@ local function agent_row_node(ag: AgentRow): Node
 	local action_key = goto_key(ag.session, ag.pane)
 	local kept: { string } = { ag.title }
 	local text_nodes: { Node } = { ui.el("span", { class = "agent-nav-title", text = ag.title }) }
-	-- How this harness was launched, muted after the title.
+	-- How this harness was launched: small pills on their own line above the title.
 	if ag.sandbox and #ag.sandbox > 0 then
-		local tags: { string } = {}
+		local pills: { Node } = {}
 		for _, tag in ag.sandbox do
-			table.insert(tags, "(" .. tag .. ")")
+			table.insert(pills, ui.el("span", { class = "agent-nav-pill", text = tag }))
 		end
-		text_nodes[1] = ui.el("span", { class = "agent-nav-head" }, {
-			text_nodes[1],
-			ui.el("span", { class = "agent-nav-sandbox", text = table.concat(tags, " ") }),
-		})
+		table.insert(text_nodes, 1, ui.el("span", { class = "agent-nav-pills" }, pills))
 	end
 	-- A line already said by this row is not printed again.
 	local function fresh(text: string?): boolean

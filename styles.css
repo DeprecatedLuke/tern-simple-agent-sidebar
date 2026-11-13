@@ -115,16 +115,23 @@
     text-overflow: ellipsis;
     pointer-events: none;
 }
-/* A root row's title, then how its harness was launched: `(kubernetes)`, ... */
-.agent-nav-head {
+/* How a root row's harness was launched (`kubernetes`, ...): pills above the title. */
+.agent-nav-pills {
     display: flex;
-    flex-direction: row;
-    align-items: baseline;
-    gap: 6px;
-    min-width: 0;
-    overflow: hidden;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 1px;
+    pointer-events: none;
 }
-.agent-nav-sandbox { flex: none; opacity: 0.55; font-weight: 400; pointer-events: none; }
+.agent-nav-pill {
+    padding: 0 5px;
+    border-radius: 2px;
+    font-size: 10px;
+    line-height: 1.5;
+    font-weight: 500;
+    color: var(--t2);
+    background: color-mix(in srgb, var(--t1) 10%, transparent);
+}
 
 .agent-nav-text {
     display: flex;
