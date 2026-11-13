@@ -87,6 +87,8 @@ type AgentRow = {
 	subagents: { { name: string, doing: string, started: number?, pct: number?, job: boolean? } },
 	-- What the agent is doing now, when it is running.
 	doing: string?,
+	-- How the `sandbox` wrapper launched its harness ("kubernetes", ...).
+	sandbox: { string }?,
 	status: string,
 	is_current: boolean,
 	-- Native position: session order, tab position, then pane order.
@@ -304,6 +306,19 @@ local function argv_text(argv: { string }): string
 	return string.lower(table.concat(argv, " "))
 end
 
+-- Redraw once a lookup answered. Queued close/focus events are reconciled
+-- before a canvas is touched again.
+local function requestRefresh()
+	if probeRefreshPending then
+		return
+	end
+	probeRefreshPending = true
+	tern.timer(0, function(cx)
+		probeRefreshPending = false
+		refresh(cx)
+	end)
+end
+
 local function probeForeground(pane_info: any)
 	local pane, title = pane_info.pane, pane_info.title or ""
 	local known = foreground[pane]
@@ -338,13 +353,8 @@ local function probeForeground(pane_info: any)
 				misses = if found then 0 else (if known then known.misses + 1 else 1),
 			}
 			local before = if known then known.argv else ""
-			if argv ~= before and not probeRefreshPending then
-				probeRefreshPending = true
-				-- Reconcile queued close/focus events before touching a canvas again.
-				tern.timer(0, function(cx)
-					probeRefreshPending = false
-					refresh(cx)
-				end)
+			if argv ~= before then
+				requestRefresh()
 			end
 		end)
 	end)
@@ -356,6 +366,140 @@ local function probeForeground(pane_info: any)
 			tern.log.warn("Agent Nav: cannot read a pane's foreground process: " .. tostring(err))
 		end
 	end
+end
+
+-- How the user's `sandbox` wrapper launched a root agent. It runs the harness as
+-- `bwrap --args FD -- <harness>`, passing binds through a descriptor, so only the
+-- environment it exported names the mode: SANDBOX_PERMISSIVE (`-p`) and
+-- SANDBOX_K8S (`-k`). Whether the agent is sandboxed at all comes from a real
+-- bwrap process in its chain, never from the environment: the wrapper exports
+-- `_SANDBOX_INSIDE` even when SANDBOX_DISABLED makes it skip bwrap. The chain is
+-- read off the window thread by a short shell over /proc, once per foreground
+-- pid; the pid is re-read from `tern process` every SANDBOX_RECHECK_MS, a few
+-- panes per pass.
+local SANDBOX_RECHECK_MS = 30000
+local SANDBOX_PROBES_PER_PASS = 2
+local sandboxInfo: { [number]: { pid: number, tags: { string }, at: number } } = {}
+local sandboxProbing: { [number]: boolean } = {}
+local sandboxStarts = 0
+local sandboxWarned = false
+-- $1 is the foreground pid. Looks for bwrap at it and up its ppid chain, else
+-- down its children four levels, then prints `bwrap=<pid>` and that bwrap's
+-- SANDBOX_* mode variables.
+local SANDBOX_SCRIPT = [==[
+p=$1 b= q=$1
+while [ "$q" -gt 1 ] && read -r c < "/proc/$q/comm"; do
+	if [ "$c" = bwrap ]; then b=$q; break; fi
+	s=$(< "/proc/$q/stat") || break
+	s=${s##*) }
+	set -- $s
+	q=$2
+done 2>/dev/null
+level=$p d=0
+while [ -z "$b" ] && [ -n "$level" ] && [ "$d" -lt 4 ]; do
+	d=$((d + 1)) next=
+	for q in $level; do
+		for f in /proc/$q/task/*/children; do
+			k=; read -r k < "$f"; next="$next $k"
+		done
+	done
+	for q in $next; do
+		if read -r c < "/proc/$q/comm" && [ "$c" = bwrap ]; then b=$q; break; fi
+	done
+	level=$next
+done 2>/dev/null
+echo "bwrap=$b"
+if [ -n "$b" ]; then
+	while IFS= read -r -d '' l; do
+		case $l in SANDBOX_PERMISSIVE=*|SANDBOX_K8S=*|SANDBOX_DISABLED=*) echo "$l" ;; esac
+	done < "/proc/$b/environ"
+fi
+exit 0
+]==]
+
+-- Tags from the script's output. Without bwrap the agent is unsandboxed, but
+-- only a foreground that names a harness is an agent: a shell left behind by
+-- one that exited says nothing.
+local function sandboxTags(out: string, harness: boolean): { string }
+	if not string.match(out, "bwrap=%d") then
+		return if harness then { "unsandboxed" } else {}
+	end
+	local vars: { [string]: string } = {}
+	for name, value in string.gmatch(out, "(SANDBOX_[%u%d_]+)=([^\n]*)") do
+		vars[name] = value
+	end
+	local tags: { string } = {}
+	if vars.SANDBOX_PERMISSIVE == "1" then
+		table.insert(tags, "privileged")
+	end
+	if vars.SANDBOX_K8S == "1" then
+		table.insert(tags, "kubernetes")
+	end
+	return tags
+end
+
+local function probeSandbox(pane: number)
+	if sandboxProbing[pane] or sandboxStarts >= SANDBOX_PROBES_PER_PASS or tern.runtime.os ~= "linux" then
+		return
+	end
+	local known = sandboxInfo[pane]
+	if known and tern.now() - known.at < SANDBOX_RECHECK_MS then
+		return
+	end
+	sandboxProbing[pane] = true
+	sandboxStarts += 1
+	local function settle(pid: number, tags: { string })
+		sandboxProbing[pane] = nil
+		sandboxInfo[pane] = { pid = pid, tags = tags, at = tern.now() }
+		if table.concat(tags, " ") ~= (if known then table.concat(known.tags, " ") else "") then
+			requestRefresh()
+		end
+	end
+	local function warn(err: any)
+		if not sandboxWarned then
+			sandboxWarned = true
+			tern.log.warn("Agent Nav: cannot read a pane's sandbox mode: " .. tostring(err))
+		end
+	end
+	local ok, err = pcall(function()
+		tern.process.run({ tern_cli(), "process", tostring(pane), "--json" }, { timeout_ms = 3000 }, function(r, _cx)
+			local fg: any = nil
+			if r.status == 0 then
+				local okJ, doc = pcall(tern.json.decode, r.stdout)
+				fg = okJ and type(doc) == "table" and doc.foreground or nil
+			end
+			if type(fg) ~= "table" or type(fg.pid) ~= "number" then
+				settle(0, {})
+				return
+			end
+			local pid = fg.pid
+			if known and known.pid == pid then
+				settle(pid, known.tags)
+				return
+			end
+			local _, harness = harness_icon(if type(fg.argv) == "table" then argv_text(fg.argv) else "")
+			local okRun, errRun = pcall(function()
+				tern.process.run({ "/bin/bash", "-c", SANDBOX_SCRIPT, "agent-nav", tostring(pid) }, { timeout_ms = 3000 }, function(s, _cx2)
+					settle(pid, if s.status == 0 then sandboxTags(s.stdout or "", harness ~= nil) else {})
+				end)
+			end)
+			if not okRun then
+				settle(pid, {})
+				warn(errRun)
+			end
+		end)
+	end)
+	if not ok then
+		sandboxProbing[pane] = nil
+		warn(err)
+	end
+end
+
+-- A root row's tags: starts a due lookup and returns the cached answer.
+local function sandboxTagsOf(pane: number): { string }?
+	probeSandbox(pane)
+	local info = sandboxInfo[pane]
+	return if info then info.tags else nil
 end
 
 -- Terminal agents that never report `busy` (Codex) mark a working turn with a
@@ -1544,6 +1688,17 @@ local function agent_row_node(ag: AgentRow): Node
 	local action_key = goto_key(ag.session, ag.pane)
 	local kept: { string } = { ag.title }
 	local text_nodes: { Node } = { ui.el("span", { class = "agent-nav-title", text = ag.title }) }
+	-- How this harness was launched, muted after the title.
+	if ag.sandbox and #ag.sandbox > 0 then
+		local tags: { string } = {}
+		for _, tag in ag.sandbox do
+			table.insert(tags, "(" .. tag .. ")")
+		end
+		text_nodes[1] = ui.el("span", { class = "agent-nav-head" }, {
+			text_nodes[1],
+			ui.el("span", { class = "agent-nav-sandbox", text = table.concat(tags, " ") }),
+		})
+	end
 	-- A line already said by this row is not printed again.
 	local function fresh(text: string?): boolean
 		if type(text) ~= "string" or text == "" then
@@ -1652,6 +1807,7 @@ local function build_view(cx: WindowCx): Node
 	if next(sampledPanes) == nil then
 		sample_status(cx)
 	end
+	sandboxStarts = 0
 
 	-- Native order: session order, then tab position, then the window's own pane
 	-- order. The manual order overrides it for the panes it lists.
@@ -1734,6 +1890,7 @@ local function build_view(cx: WindowCx): Node
 				cwd = p.cwd,
 				doing = if is_running then mainDoing[p.pane] else nil,
 				subagents = subagents_of(p.pane),
+				sandbox = sandboxTagsOf(p.pane),
 				status = status,
 				is_current = is_focused,
 				rank = (session_rank[sid] or 0) * 1000000 + (tab_rank[p.tab] or 0) * 1000 + row_index,
@@ -2375,6 +2532,8 @@ tern.on("pane_closed", function(ev: PaneEvent, cx: WindowCx)
 	wasRunning[ev.pane] = nil
 	everActive[ev.pane] = nil
 	listedAgents[ev.pane] = nil
+	sandboxInfo[ev.pane] = nil
+	sandboxProbing[ev.pane] = nil
 	subItems[ev.pane] = nil
 	subDirs[ev.pane] = nil
 	seenDirty = true

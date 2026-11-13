@@ -115,6 +115,16 @@
     text-overflow: ellipsis;
     pointer-events: none;
 }
+/* A root row's title, then how its harness was launched: `(kubernetes)`, ... */
+.agent-nav-head {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+}
+.agent-nav-sandbox { flex: none; opacity: 0.55; font-weight: 400; pointer-events: none; }
 
 .agent-nav-text {
     display: flex;
